@@ -1,0 +1,30 @@
+#!/bin/env bash
+###comment out lines by adding at least two `#' at the beginning
+#SBATCH --partition=lln
+#SBATCH --output=/home/qyang1/outs/%x.out.%j
+#SBATCH --error=/home/qyang1/outs/%x.err.%j
+#SBATCH --time=5-00:00:00
+#SBATCH --mem=64000
+#SBATCH --nodes=1
+##SBATCH --cores-per-socket=10
+#SBATCH --cpus-per-task=8
+#SBATCH --ntasks=1
+
+
+module load matlab/r2024a
+export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/opt/ohpc/pub/apps/matlab_r2024a/runtime/glnxa64:/opt/ohpc/pub/apps/matlab_r2024a/bin/glnxa64:/opt/ohpc/pub/apps/matlab_r2024a/sys/os/glnxa64:/opt/ohpc/pub/apps/matlab_r2024a/extern/bin/glnxa64
+echo $LD_LIBRARY_PATH
+export DATADIR=$HOME
+
+hostname
+date
+da=`date`
+hn=`hostname | tr "." " " | awk '{ print $1}'`
+echo $da $hn $SLURM_JOB_ID $1 $SLURM_JOB_NAME >> $HOME/submittedjobs.log
+cd $HOME/tn/proj/$1
+srun simrunner . $(basename "$SLURM_JOB_NAME" .m)
+date
+echo $da $hn $SLURM_JOB_ID $1 $SLURM_JOB_NAME  >> $HOME/finishedjobs.log
+
+# sbatch --job-name=ssmptestsimple runjob ssm ssmptestsimple
+# in kitaev32 folder

@@ -1,0 +1,423 @@
+#!/usr/bin/python3
+import os
+import sys
+import subprocess
+import argparse
+from pathlib import Path
+import json
+from colorama import init, Fore, Style
+import tempfile
+import yaml
+
+# Initialize colorama
+init()
+
+# Default configuration
+DEFAULT_CONFIG = {
+    "env_name": "hpc_env",
+    "python_version": "3.12",
+    "conda_packages": [
+        "numpy",
+        "scipy",
+        "matplotlib",
+        "pandas",
+        "numba",
+        "h5py",
+        "ipython",
+        "jupyter",
+        "tqdm"
+    ],
+    "pip_packages": [
+        "black",
+        "flake8",
+        "pytest",
+        "rich",
+        "tldr",
+        "colorama",
+        "pyyaml"
+    ],
+    "conda_channels": [
+        "conda-forge",
+        "defaults"
+    ],
+    "tools": {
+        "autojump": {
+            "install": [
+                "git clone https://github.com/wting/autojump.git ~/autojump || (cd ~/autojump && git pull)",
+                "cd ~/autojump && python ./install.py"
+            ]
+        },
+        "starship": {
+            "check": "which starship",
+            "install": [
+                # Try package manager first
+                "if command -v apt-get >/dev/null; then sudo apt-get update && sudo apt-get install -y starship; elif command -v dnf >/dev/null; then sudo dnf install -y starship; else curl -sS https://starship.rs/install.sh | sh -s -- -y; fi"
+            ]
+        }
+    }
+}
+
+def load_config():
+    """Load configuration from config.json or create it from defaults"""
+    config_path = Path(__file__).parent / 'config.json'
+    
+    # If config.json exists, load and validate it
+    if config_path.exists():
+        try:
+            with open(config_path) as f:
+                config = json.load(f)
+            # Validate and merge with defaults to ensure all required fields exist
+            merged_config = DEFAULT_CONFIG.copy()
+            merged_config.update(config)
+            return merged_config
+        except json.JSONDecodeError:
+            print(f"{Fore.YELLOW}Warning: Invalid config.json, using defaults{Style.RESET_ALL}")
+            return DEFAULT_CONFIG
+    
+    print(f"{Fore.CYAN}Creating default config.json{Style.RESET_ALL}")
+    # Save default config
+    with open(config_path, 'w') as f:
+        json.dump(DEFAULT_CONFIG, f, indent=2)
+    return DEFAULT_CONFIG
+
+def print_cmd(cmd, preview=False):
+    """Print command with color"""
+    if preview:
+        print(f"{Fore.CYAN}→ {cmd}{Style.RESET_ALL}")
+    else:
+        print(f"{Fore.GREEN}✓ {cmd}{Style.RESET_ALL}")
+
+def print_section(name):
+    """Print section header"""
+    print(f"\n{Fore.YELLOW}● {name}{Style.RESET_ALL}")
+
+def run_ssh_command(host, command, preview=False):
+    """Run a command on remote host via SSH"""
+    ssh_cmd = ['ssh', host, command]
+    if preview:
+        print_cmd(command, preview)
+        return subprocess.CompletedProcess(ssh_cmd, returncode=0, stdout="", stderr="")
+    result = subprocess.run(ssh_cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        print(f"{Fore.RED}✗ Failed: {command}{Style.RESET_ALL}")
+        print(result.stderr)
+    else:
+        print_cmd(command)
+    return result
+
+def copy_files_to_remote(host, local_path, remote_path, preserve_mode=False, preview=False):
+    """Copy files to remote host using scp"""
+    scp_cmd = ['scp']
+    if preserve_mode:
+        scp_cmd.append('-p')  # Preserve permissions
+    scp_cmd.extend(['-r', str(local_path), f'{host}:{remote_path}'])
+    if preview:
+        print_cmd(' '.join(scp_cmd), preview)
+        return subprocess.CompletedProcess(scp_cmd, returncode=0, stdout="", stderr="")
+    return subprocess.run(scp_cmd, capture_output=True, text=True)
+
+def setup_condarc(host, config, preview=False):
+    """Set up proper .condarc file"""
+    # First remove any existing .condarc to avoid conflicts
+    run_ssh_command(host, 'rm -f ~/.condarc', preview)
+    
+    # Create conda config as proper Python dict
+    conda_config = {
+        'channels': config.get('conda_channels', ['conda-forge', 'defaults']),
+        'channel_priority': 'flexible',
+        'ssl_verify': True
+    }
+    
+    # Configure YAML dumper for proper formatting
+    class MyDumper(yaml.Dumper):
+        def increase_indent(self, flow=False, *args, **kwargs):
+            return super().increase_indent(flow=flow, indentless=False)
+    
+    if preview:
+        print(f"{Fore.CYAN}→ Will create .condarc with config:{Style.RESET_ALL}")
+        print(yaml.dump(conda_config, Dumper=MyDumper, default_flow_style=False, indent=2))
+        return
+        
+    # Write .condarc content to a temporary file
+    with tempfile.NamedTemporaryFile(mode='w', delete=False) as f:
+        yaml.dump(conda_config, f, Dumper=MyDumper, default_flow_style=False, indent=2)
+        temp_path = f.name
+    
+    try:
+        # Copy to remote and verify
+        copy_files_to_remote(host, temp_path, '~/.condarc')
+        
+        # Verify the content on remote
+        verify_cmd = 'cat ~/.condarc'
+        result = run_ssh_command(host, verify_cmd, preview=False)
+        if result.returncode == 0:
+            print(f"{Fore.GREEN}✓ Created .condarc with content:{Style.RESET_ALL}")
+            print(result.stdout)
+        else:
+            print(f"{Fore.RED}Failed to verify .condarc content{Style.RESET_ALL}")
+    finally:
+        os.remove(temp_path)
+
+def install_starship(host, preview=False):
+    """Install starship using conda-forge"""
+    if preview:
+        print(f"{Fore.CYAN}→ Will install starship from conda-forge{Style.RESET_ALL}")
+        return
+
+    install_cmd = 'CONDA_NO_PLUGINS=true ~/miniconda/bin/conda install -y --solver=classic -c conda-forge starship'
+    result = run_ssh_command(host, install_cmd, preview)
+    
+    if result.returncode != 0:
+        print(f"{Fore.YELLOW}Conda installation failed, trying binary download...{Style.RESET_ALL}")
+        # Fallback to binary download if conda fails
+        commands = [
+            'mkdir -p ~/.local/bin',
+            'curl -L https://github.com/starship/starship/releases/latest/download/starship-x86_64-unknown-linux-gnu.tar.gz -o ~/starship.tar.gz',
+            'tar xf ~/starship.tar.gz -C ~/.local/bin',
+            'chmod +x ~/.local/bin/starship',
+            'rm ~/starship.tar.gz'
+        ]
+        for cmd in commands:
+            run_ssh_command(host, cmd, preview)
+
+def setup_python_env(remote_host, config, preview=False):
+    """Set up Python environment with necessary packages"""
+    # First ensure .condarc is properly set up
+    setup_condarc(remote_host, config, preview)
+    
+    if preview:
+        print(f"{Fore.CYAN}→ Will set up Python environment:{Style.RESET_ALL}")
+        print(f"  • Environment: {config['env_name']}")
+        print(f"  • Python version: {config['python_version']}")
+        print(f"  • Conda packages: {', '.join(config['conda_packages'])}")
+        print(f"  • Pip packages: {', '.join(config['pip_packages'])}")
+        return
+
+    # Check if Miniconda needs to be installed
+    conda_check = run_ssh_command(remote_host, 'which conda', preview=False)
+    if conda_check.returncode != 0:
+        print(f"{Fore.YELLOW}Installing Miniconda...{Style.RESET_ALL}")
+        install_commands = [
+            'wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O ~/miniconda.sh',
+            'bash ~/miniconda.sh -b -p ~/miniconda',
+            'rm ~/miniconda.sh',
+            '~/miniconda/bin/conda init bash'
+        ]
+        for cmd in install_commands:
+            result = run_ssh_command(remote_host, cmd, preview)
+            if result.returncode != 0:
+                print(f"{Fore.RED}Failed to install Miniconda. Error: {result.stderr}{Style.RESET_ALL}")
+                return
+    
+    # Create/update environment
+    env_name = config['env_name']
+    python_version = config['python_version']
+    
+    # Create environment if it doesn't exist
+    create_env_cmd = f'CONDA_NO_PLUGINS=true ~/miniconda/bin/conda create -y --solver=classic -n {env_name} python={python_version}'
+    result = run_ssh_command(remote_host, create_env_cmd, preview)
+    if result.returncode != 0:
+        print(f"{Fore.RED}Failed to create conda environment. Error: {result.stderr}{Style.RESET_ALL}")
+        return
+    
+    # Install conda packages
+    if config['conda_packages']:
+        packages = ' '.join(config['conda_packages'])
+        install_cmd = f'CONDA_NO_PLUGINS=true ~/miniconda/bin/conda install -y --solver=classic -n {env_name} {packages}'
+        result = run_ssh_command(remote_host, install_cmd, preview)
+        if result.returncode != 0:
+            print(f"{Fore.RED}Failed to install conda packages. Error: {result.stderr}{Style.RESET_ALL}")
+    
+    # Install pip packages
+    if config['pip_packages']:
+        packages = ' '.join(config['pip_packages'])
+        pip_cmd = f'~/miniconda/bin/conda run -n {env_name} pip install --no-cache-dir {packages}'
+        result = run_ssh_command(remote_host, pip_cmd, preview)
+        if result.returncode != 0:
+            print(f"{Fore.RED}Failed to install pip packages. Error: {result.stderr}{Style.RESET_ALL}")
+
+def create_enhanced_bashrc(config):
+    """Create an enhanced .bashrc template"""
+    bashrc_content = f"""# .bashrc
+
+# Source global definitions
+if [ -f /etc/bashrc ]; then
+    . /etc/bashrc
+fi
+
+# Environment variables
+export LANG=en_US.UTF-8
+export PATH="$HOME/.local/bin:$HOME/bin:$HOME/miniconda/bin:$PATH"
+export MANPATH="/usr/local/man:$MANPATH"
+export DATADIR=$HOME
+
+# Conda initialization
+if [ -f "$HOME/miniconda/etc/profile.d/conda.sh" ]; then
+    . "$HOME/miniconda/etc/profile.d/conda.sh"
+else
+    export PATH="$HOME/miniconda/bin:$PATH"
+fi
+
+# HPC Environment aliases
+alias activate_hpc='conda activate {config["env_name"]}'
+alias jupyter_hpc='conda activate {config["env_name"]} && jupyter notebook --no-browser --port=8888'
+alias mysq='squeue -u $USER'
+alias squeue='squeue -o"%.7i %.12P %.30j %.8u %.2t %.10M %.6D %C"'
+alias sinfo='sinfo -N -o"%5P %.5a %.10l %.10s %.4r %.8h %.10g %.6D %.11T %.11i %N %C"'
+
+# Autojump
+[[ -s $HOME/.autojump/etc/profile.d/autojump.sh ]] && source $HOME/.autojump/etc/profile.d/autojump.sh
+
+# Starship prompt
+eval "$(starship init bash)"
+
+# SSH agent (commented by default)
+# eval $(ssh-agent -s)
+# ssh-add ~/.ssh/id_rsa 2>/dev/null
+"""
+    
+    home_dir = Path(__file__).parent / 'home'
+    home_dir.mkdir(exist_ok=True)
+    with open(home_dir / '.bashrc', 'w') as f:
+        f.write(bashrc_content)
+
+def setup_home_directory(host, home_dir, preview=False):
+    """Set up home directory with proper permissions"""
+    # Create necessary directories
+    run_ssh_command(host, 'mkdir -p ~/.ssh ~/bin', preview)
+    
+    # Copy .ssh directory with preserved permissions
+    ssh_dir = home_dir / '.ssh'
+    if ssh_dir.exists():
+        print("Would copy SSH configuration..." if preview else "Copying SSH configuration...")
+        copy_files_to_remote(host, ssh_dir, '~/', preserve_mode=True, preview=preview)
+        # Fix SSH directory permissions
+        run_ssh_command(host, 'chmod 700 ~/.ssh && chmod 600 ~/.ssh/*', preview)
+    
+    # Copy bin directory
+    bin_dir = home_dir / 'bin'
+    if bin_dir.exists():
+        print("Would copy bin directory..." if preview else "Copying bin directory...")
+        copy_files_to_remote(host, bin_dir, '~/', preview=preview)
+        # Make bin files executable
+        run_ssh_command(host, 'chmod +x ~/bin/*', preview)
+    
+    # Copy other configuration files
+    for file in home_dir.glob('.*'):
+        if file.is_file() and file.name not in ['.', '..']:
+            print(f"Would copy {file.name}..." if preview else f"Copying {file.name}...")
+            copy_files_to_remote(host, file, '~/', preview=preview)
+
+def check_tool_status(host, tool, tool_config, preview=False):
+    """Check if a tool is installed and return status and version info"""
+    if 'check' not in tool_config:
+        return False, None
+    
+    check_result = run_ssh_command(host, tool_config['check'], preview=False)  # Always check, even in preview
+    is_installed = check_result.returncode == 0
+    version_info = check_result.stdout.strip() if is_installed else None
+    return is_installed, version_info
+
+def main():
+    parser = argparse.ArgumentParser(description='Initialize development environment on remote server')
+    parser.add_argument('host', help='Remote host (as configured in ~/.ssh/config)')
+    parser.add_argument('-p', '--preview', action='store_true', help='Preview actions without executing them')
+    args = parser.parse_args()
+
+    config = load_config()
+    print_section(f"Initializing {args.host}")
+
+    # Check existing tools first
+    print_section("Tool Status")
+    tools_to_install = {}
+    installed_tools = {}
+    
+    for tool, tool_config in config['tools'].items():
+        is_installed, version_info = check_tool_status(args.host, tool, tool_config, args.preview)
+        if is_installed:
+            installed_tools[tool] = version_info
+            print(f"{Fore.GREEN}✓ {tool} is already installed{Style.RESET_ALL}")
+            if version_info:
+                print(f"  {Fore.WHITE}Version: {version_info}{Style.RESET_ALL}")
+        else:
+            tools_to_install[tool] = tool_config
+            if args.preview:
+                print(f"{Fore.CYAN}→ Will install: {tool}{Style.RESET_ALL}")
+                print(f"  {Fore.WHITE}Commands:{Style.RESET_ALL}")
+                for cmd in tool_config['install']:
+                    print(f"  {Fore.CYAN}→ {cmd}{Style.RESET_ALL}")
+
+    # Create enhanced bashrc
+    create_enhanced_bashrc(config)
+
+    # Set up home directory
+    home_dir = Path(__file__).parent / 'home'
+    if home_dir.exists():
+        print_section("Home Directory Setup")
+        setup_home_directory(args.host, home_dir, args.preview)
+    
+    # Python environment
+    print_section("Python Environment")
+    conda_check = run_ssh_command(args.host, 'which conda', False)  # Always check conda
+    if conda_check.returncode == 0:
+        conda_version = run_ssh_command(args.host, 'conda --version', False)
+        print(f"{Fore.GREEN}✓ conda is installed{Style.RESET_ALL}")
+        print(f"  {Fore.WHITE}Version: {conda_version.stdout.strip()}{Style.RESET_ALL}")
+        if args.preview:
+            print(f"{Fore.CYAN}→ Will update Python environment{Style.RESET_ALL}")
+    else:
+        if args.preview:
+            print(f"{Fore.CYAN}→ Will install conda and Python environment{Style.RESET_ALL}")
+        setup_python_env(args.host, config, args.preview)
+
+    # Add ./home to .gitignore
+    gitignore_path = Path(__file__).parent / '.gitignore'
+    if not gitignore_path.exists() or './home' not in gitignore_path.read_text():
+        if args.preview:
+            print_cmd("Add ./home to .gitignore", True)
+        else:
+            with open(gitignore_path, 'a') as f:
+                f.write('\n./home\n')
+            print_cmd("Added ./home to .gitignore")
+
+    # Install required tools
+    if tools_to_install:
+        print_section("Tool Installation")
+        if args.preview:
+            print(f"{Fore.CYAN}→ Will install {len(tools_to_install)} new tools{Style.RESET_ALL}")
+        else:
+            for tool, tool_config in tools_to_install.items():
+                print(f"{Fore.YELLOW}Installing {tool}...{Style.RESET_ALL}")
+                if tool == 'starship':
+                    install_starship(args.host, args.preview)
+                else:
+                    for cmd in tool_config['install']:
+                        run_ssh_command(args.host, cmd, args.preview)
+
+    if args.preview:
+        print(f"\n{Fore.BLUE}Preview Summary:{Style.RESET_ALL}")
+        print(f"{Fore.GREEN}✓ {len(installed_tools)} tools already installed{Style.RESET_ALL}")
+        for tool, version in installed_tools.items():
+            print(f"  • {tool}" + (f" ({version})" if version else ""))
+        if tools_to_install:
+            print(f"{Fore.CYAN}→ {len(tools_to_install)} tools to install:{Style.RESET_ALL}")
+            for tool in tools_to_install:
+                print(f"  • {tool}")
+        print(f"\n{Fore.BLUE}Run without -p to execute installation steps.{Style.RESET_ALL}")
+    else:
+        print(f"\n{Fore.GREEN}Initialization complete!{Style.RESET_ALL}")
+        print(f"""
+{Fore.YELLOW}Next steps:{Style.RESET_ALL}
+1. Log out and log back in
+2. Run: conda activate {config['env_name']} (or use alias: activate_hpc)
+3. For Jupyter: jupyter_hpc
+
+{Fore.YELLOW}Installed packages:{Style.RESET_ALL}
+• Scientific: {', '.join(p for p in config['conda_packages'] if p in ['numpy', 'scipy', 'matplotlib', 'pandas'])}
+• Parallel: {', '.join(p for p in config['conda_packages'] if p in ['numba'])}
+• Development: {', '.join(config['pip_packages'])}
+• Interactive: {', '.join(p for p in config['conda_packages'] if p in ['jupyter', 'ipython'])}
+""")
+
+if __name__ == '__main__':
+    main()

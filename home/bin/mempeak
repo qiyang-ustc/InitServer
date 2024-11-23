@@ -1,0 +1,2 @@
+echo jobid of current job:$SLURM_JOB_ID
+sstat -p --format=AveCPU,MaxVMSize,AveVMSize -j $SLURM_JOB_ID

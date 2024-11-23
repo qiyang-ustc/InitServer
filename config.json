@@ -1,0 +1,39 @@
+{
+  "env_name": "hpc_env",
+  "python_version": "3.12",
+  "conda_packages": [
+    "numpy",
+    "scipy",
+    "matplotlib",
+    "pandas",
+    "numba",
+    "h5py",
+    "ipython",
+    "jupyter",
+    "tqdm"
+  ],
+  "pip_packages": [
+    "black",
+    "flake8",
+    "pytest",
+    "rich",
+    "tldr"
+  ],
+  "conda_channels": [
+    "conda-forge",
+    "defaults"
+  ],
+  "tools": {
+    "autojump": {
+      "install": [
+        "git clone https://github.com/wting/autojump.git ~/autojump || (cd ~/autojump && git pull)",
+        "cd ~/autojump && python ./install.py"
+      ]
+    },
+    "starship": {
+      "install": [
+        "curl -sS https://starship.rs/install.sh | sh -s -- -y"
+      ]
+    }
+  }
+}
