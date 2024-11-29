@@ -240,23 +240,11 @@ def create_enhanced_bashrc(config):
     """Create an enhanced .bashrc template"""
     bashrc_content = f"""# .bashrc
 
-# Source global definitions
-if [ -f /etc/bashrc ]; then
-    . /etc/bashrc
-fi
-
 # Environment variables
 export LANG=en_US.UTF-8
 export PATH="$HOME/.local/bin:$HOME/bin:$HOME/miniconda/bin:$PATH"
 export MANPATH="/usr/local/man:$MANPATH"
 export DATADIR=$HOME
-
-# Conda initialization
-if [ -f "$HOME/miniconda/etc/profile.d/conda.sh" ]; then
-    . "$HOME/miniconda/etc/profile.d/conda.sh"
-else
-    export PATH="$HOME/miniconda/bin:$PATH"
-fi
 
 # HPC Environment aliases
 alias activate_hpc='conda activate {config["env_name"]}'
@@ -284,7 +272,7 @@ eval "$(starship init bash)"
 def setup_home_directory(host, home_dir, preview=False):
     """Set up home directory with proper permissions"""
     # Create necessary directories
-    run_ssh_command(host, 'mkdir -p ~/.ssh ~/bin', preview)
+    run_ssh_command(host, 'mkdir -p ~/.ssh ~/bin ~/.config', preview)
     
     # Copy .ssh directory with preserved permissions
     ssh_dir = home_dir / '.ssh'
@@ -301,6 +289,12 @@ def setup_home_directory(host, home_dir, preview=False):
         copy_files_to_remote(host, bin_dir, '~/', preview=preview)
         # Make bin files executable
         run_ssh_command(host, 'chmod +x ~/bin/*', preview)
+
+    # Copy .config directory
+    config_dir = home_dir / '.config'
+    if config_dir.exists():
+        print("Would copy .config directory..." if preview else "Copying .config directory...")
+        copy_files_to_remote(host, config_dir, '~/', preview=preview)
     
     # Copy other configuration files
     for file in home_dir.glob('.*'):
@@ -317,6 +311,18 @@ def check_tool_status(host, tool, tool_config, preview=False):
     is_installed = check_result.returncode == 0
     version_info = check_result.stdout.strip() if is_installed else None
     return is_installed, version_info
+
+def append_starship_init(host, preview=False):
+    """Append Starship initialization to .bashrc after all setup is complete"""
+    starship_init = '\n# Starship prompt\neval "$(starship init bash)"\n'
+    if preview:
+        print(f"{Fore.CYAN}→ Will append to .bashrc:{Style.RESET_ALL}")
+        print(starship_init)
+        return
+    
+    # Use echo to append the lines to .bashrc
+    cmd = f"echo '{starship_init}' >> ~/.bashrc"
+    run_ssh_command(host, cmd, preview)
 
 def main():
     parser = argparse.ArgumentParser(description='Initialize development environment on remote server')
@@ -405,6 +411,8 @@ def main():
                 print(f"  • {tool}")
         print(f"\n{Fore.BLUE}Run without -p to execute installation steps.{Style.RESET_ALL}")
     else:
+        # Add Starship initialization to .bashrc after everything else is done
+        append_starship_init(args.host, args.preview)
         print(f"\n{Fore.GREEN}Initialization complete!{Style.RESET_ALL}")
         print(f"""
 {Fore.YELLOW}Next steps:{Style.RESET_ALL}

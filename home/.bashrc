@@ -1,22 +1,10 @@
 # .bashrc
 
-# Source global definitions
-if [ -f /etc/bashrc ]; then
-    . /etc/bashrc
-fi
-
 # Environment variables
 export LANG=en_US.UTF-8
 export PATH="$HOME/.local/bin:$HOME/bin:$HOME/miniconda/bin:$PATH"
 export MANPATH="/usr/local/man:$MANPATH"
 export DATADIR=$HOME
-
-# Conda initialization
-if [ -f "$HOME/miniconda/etc/profile.d/conda.sh" ]; then
-    . "$HOME/miniconda/etc/profile.d/conda.sh"
-else
-    export PATH="$HOME/miniconda/bin:$PATH"
-fi
 
 # HPC Environment aliases
 alias activate_hpc='conda activate hpc_env'
